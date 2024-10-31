@@ -1,0 +1,228 @@
+---
+title: "cranes"
+author: "Brian Yandell"
+date: "2024-10-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<https://www.allaboutbirds.org/guide/Whooping_Crane/overview>
+<https://explorer.audubon.org/>
+
+```{r eval=FALSE}
+library(zip)
+library(stringr)
+library(readr)
+library(dplyr)
+library(geosphere)
+library(ggplot2)
+library(ggmap)
+library(sf)
+library(ggplot2)
+library(leaflet)
+library(shiny)
+```
+
+```{r}
+# Get month names
+month_names <- month.name
+
+# Create data directory in the home folder
+data_dir <- file.path(
+  path.expand("~"),
+  "earth-analytics",
+  "data",
+  "species"
+)
+dir.create(data_dir, showWarnings = FALSE)
+
+# Define the directory name for GBIF data
+gbif_dir <- file.path(data_dir, "gbif_grus")
+gbif_dir
+
+# Reset credentials
+reset_credentials <- FALSE
+# GBIF needs a username, password, and email
+credentials <- list(
+  GBIF_USER = readline(prompt = "username: "),
+  GBIF_PWD = readline(prompt = "password: "),
+  GBIF_EMAIL = readline(prompt = "email: ")
+)
+
+if (reset_credentials) {
+  Sys.unsetenv("GBIF_USER")
+  Sys.unsetenv("GBIF_PWD")
+  Sys.unsetenv("GBIF_EMAIL")
+}
+
+for (env_variable in names(credentials)) {
+  if (!Sys.getenv(env_variable, unset = NA) %in% NA) {
+    Sys.setenv(!!env_variable := credentials[[env_variable]])
+  }
+}
+```
+
+```{r}
+# Query species
+species_info <- rgbif::name_lookup('grus americana', rank='SPECIES')
+
+# Get the first result
+first_result <- species_info$results[[1]]
+
+# Get the species key (nubKey)
+species_key <- first_result$nubKey
+
+# Check the result
+first_result$species
+species_key
+
+# Download data from GBIF
+gbif_dir <- "your_gbif_directory"  # Set your GBIF directory
+data_dir <- "your_data_directory"    # Set your data directory
+gbif_pattern <- file.path(gbif_dir, '*.csv')
+
+if (length(list.files(gbif_dir, pattern = "*.csv")) == 0) {
+    # Only submit one request
+    if (is.null(Sys.getenv("GBIF_DOWNLOAD_KEY"))) {
+        # Submit query to GBIF
+        gbif_query <- rgbif::occ_download(
+            rgbif::pred("speciesKey", 2474953),
+            rgbif::pred("hasCoordinate", TRUE),
+            rgbif::pred("year", 2023)
+        )
+        Sys.setenv(GBIF_DOWNLOAD_KEY = gbif_query$key)
+    }
+
+    # Wait for the download to build
+    download_key <- Sys.getenv("GBIF_DOWNLOAD_KEY")
+    wait <- rgbif::occ_download_meta(download_key)$status
+    while (wait != 'SUCCEEDED') {
+        wait <- rgbif::occ_download_meta(download_key)$status
+        Sys.sleep(5)
+    }
+
+    # Download GBIF data
+    download_info <- rgbif::occ_download_get(
+        Sys.getenv("GBIF_DOWNLOAD_KEY"), 
+        path = data_dir
+    )
+
+    # Unzip GBIF data
+    utils::unzip(download_info$path, exdir = gbif_dir)
+}
+
+# Find the extracted .csv file path (take the first result)
+gbif_path <- list.files(gbif_dir, pattern = "*.csv", full.names = TRUE)[1]
+gbif_path
+```
+
+```{r}
+# Load necessary libraries
+library(readr)
+library(sf)
+
+# Load the GBIF data
+gbif_df <- read_delim(
+    gbif_path, 
+    delim = "\t",
+    col_names = TRUE,
+    col_types = cols(.default = "c"),
+    skip = 0
+) %>%
+    select(gbifID, month, year, countryCode, stateProvince, decimalLatitude, decimalLongitude) %>%
+    mutate(gbifID = as.integer(gbifID))
+
+# Convert GBIF data to a sf object by Month
+gdf_monthly <- st_as_sf(
+    gbif_df, 
+    coords = c("decimalLongitude", "decimalLatitude"), 
+    crs = 4326
+) %>%
+    select(month, geometry)
+
+# Set up the ecoregion boundary URL
+ecoregions_url <- "https://storage.googleapis.com/teow2016/Ecoregions2017.zip"
+
+# Set up a path to save the data on your machine
+ecoregions_dir <- file.path(data_dir, 'wwf_ecoregions')
+
+# Make the ecoregions directory
+dir.create(ecoregions_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Join ecoregions shapefile path
+ecoregions_path <- file.path(ecoregions_dir, 'wwf_ecoregions.shp')
+
+# Only download once
+if (!file.exists(ecoregions_path)) {
+    ecoregions_gdf <- st_read(ecoregions_url)
+    st_write(ecoregions_gdf, ecoregions_path)
+}
+```
+
+```{r}
+# Count the observations in each ecoregion each month
+get_monthly_regional_observations <- function(df, region_type, occurrence_name) {
+  
+  occurrence_df <- df %>%
+    group_by(!!sym(region_type), month) %>%
+    summarise(occurrences = n(), .groups = 'drop')
+  
+  # Get rid of rare observations (possible misidentification)
+  occurrence_df <- occurrence_df %>% filter(occurrences > 1)
+  
+  # Take the mean by region
+  mean_occurrences_by_region <- occurrence_df %>%
+    group_by(!!sym(region_type)) %>%
+    summarise(mean_occurrences = mean(occurrences), .groups = 'drop')
+  
+  # Take the mean by month
+  mean_occurrences_by_month <- occurrence_df %>%
+    group_by(month) %>%
+    summarise(mean_occurrences = mean(occurrences), .groups = 'drop')
+  
+  # Normalize by space and time for sampling effort
+  occurrence_df <- occurrence_df %>%
+    left_join(mean_occurrences_by_region, by = region_type) %>%
+    left_join(mean_occurrences_by_month, by = "month") %>%
+    mutate(norm_occurrences = occurrences / mean_occurrences.x / mean_occurrences.y)
+  
+  return(occurrence_df
+         %>% select(-mean_occurrences.x, -mean_occurrences.y))
+}
+
+occurrence_df <- get_monthly_regional_observations(gbif_ecoregion_gdf, 'ecoregion', 'name')
+
+occurrence_df
+```
+
+```{r}
+# %%
+# Plot occurrence by ecoregion and month
+migration_plot = (
+    occurrence_gdf
+    .hvplot(
+        c='norm_occurrences',
+        groupby='month',
+        # Use background tiles
+        title='Antigone canadensis Sandhill Crane Migration',
+        geo=True, crs=ccrs.Mercator(), tiles='CartoLight',
+        xlim=(xmin, xmax), ylim=(ymin, ymax),
+        frame_height=600,
+        colorbar=False,
+        widgets={'month': slider},
+        widget_location='bottom',
+        width=500,
+        height=500
+    )
+)
+
+# Save the plot
+migration_plot.save('sandhill-crane-migration.html', embed=True)
+
+# Show the plot
+migration_plot
+```
+
