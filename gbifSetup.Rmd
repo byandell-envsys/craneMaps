@@ -1,5 +1,5 @@
 ---
-title: "cranes"
+title: "GBIF Data Setup"
 author: "Brian Yandell"
 date: "2024-10-24"
 output: html_document
@@ -15,25 +15,14 @@ knitr::opts_chunk$set(echo = TRUE)
 <https://www.allaboutbirds.org/guide/Whooping_Crane/overview>
 <https://explorer.audubon.org/>
 
-```{r eval=FALSE}
-library(zip)
-library(stringr)
-library(readr)
-library(dplyr)
-library(geosphere)
-library(ggplot2)
-library(ggmap)
-library(sf)
-library(ggplot2)
-library(leaflet)
-library(shiny)
-```
-
 ```{r}
 for(i in dir("R")) {
   source(file.path("R", i))
 }
 ```
+
+This has some general things about GBIF account
+and some specific things about getting single species data.
 
 ```{r}
 gbif_credentials(FALSE)
@@ -56,9 +45,29 @@ Here, rather than picking the first, I look for `species` match
 and most frequent `nubKey`.
 
 ```{r}
-# Query species
 species_info <- rgbif::name_lookup(params$species, rank='SPECIES')
+```
 
+```{r}
+dplyr::select(species_info$data[1,], scientificName, species, nubKey)
+```
+
+```{r}
+nrow(species_info$data)
+```
+
+```{r}
+# Query species
+knitr::kable(dplyr::count(species_info$data, scientificName, species, nubKey))
+```
+
+```{r}
+dplyr::filter(species_info$data,
+                    .data$species == params$species) |>
+  dplyr::count(scientificName, species, nubKey)
+```
+
+```{r}
 # Get the first result
 (species_data <- 
   dplyr::filter(
@@ -68,6 +77,10 @@ species_info <- rgbif::name_lookup(params$species, rank='SPECIES')
                     !is.na(.data$nubKey)),
         species, nubKey),
     n == max(n)))
+```
+
+```{r}
+knitr::knit_exit()
 ```
 
 Use species key (nubKey) to pull data.
@@ -132,6 +145,8 @@ gbif_df <- readr::read_delim(
   dplyr::select(gbifID, month, year, countryCode, stateProvince, decimalLatitude, decimalLongitude)
 ```
 
+Probably do not need individual observations.
+
 ```{r}
 gdf_monthly <- dplyr::count(gbif_df, month, year,
   countryCode, stateProvince, decimalLatitude, decimalLongitude)
@@ -158,71 +173,3 @@ if (!file.exists(ecoregions_path)) {
     sf::st_write(ecoregions_gdf, ecoregions_path)
 }
 ```
-
-```{r}
-# Count the observations in each ecoregion each month
-get_monthly_regional_observations <- function(df, region_type, occurrence_name) {
-  
-  occurrence_df <- 
-    dplyr::group_by(df, !!sym(region_type), month) |>
-    dplyr::summarise(occurrences = n(), .groups = 'drop') |>
-    dplyr::ungroup()
-  
-  # Get rid of rare observations (possible misidentification)
-  occurrence_df <- dplyr::filter(occurrence_df, occurrences > 1)
-  
-  # Take the mean by region
-  mean_occurrences_by_region <- 
-    dplyr::group_by(occurrence_df, !!sym(region_type)) |>
-    dplyr::summarise(mean_occurrences = mean(occurrences), .groups = 'drop') |>
-    dplyr::ungroup()
-  
-  # Take the mean by month
-  mean_occurrences_by_month <- 
-    dplyr::group_by(occurrence_df, month) |>
-    dplyr::summarise(mean_occurrences = mean(occurrences), .groups = 'drop') |>
-    dplyr::ungroup
-  
-  # Normalize by space and time for sampling effort
-  occurrence_df <-
-    dplyr::left_join(occurrence_df, mean_occurrences_by_region,
-                     by = region_type) |>
-    dplyr::left_join(mean_occurrences_by_month, by = "month") |>
-    dplyr::mutate(norm_occurrences = occurrences / mean_occurrences.x / mean_occurrences.y)
-  
-  return(dplyr::select(occurrence_df, -mean_occurrences.x, -mean_occurrences.y))
-}
-
-occurrence_df <- get_monthly_regional_observations(gbif_ecoregion_gdf, 'ecoregion', 'name')
-
-occurrence_df
-```
-
-```{r}
-# %%
-# Plot occurrence by ecoregion and month
-migration_plot = (
-    occurrence_gdf
-    .hvplot(
-        c='norm_occurrences',
-        groupby='month',
-        # Use background tiles
-        title='Antigone canadensis Sandhill Crane Migration',
-        geo=True, crs=ccrs.Mercator(), tiles='CartoLight',
-        xlim=(xmin, xmax), ylim=(ymin, ymax),
-        frame_height=600,
-        colorbar=False,
-        widgets={'month': slider},
-        widget_location='bottom',
-        width=500,
-        height=500
-    )
-)
-
-# Save the plot
-migration_plot.save('sandhill-crane-migration.html', embed=True)
-
-# Show the plot
-migration_plot
-```
-
