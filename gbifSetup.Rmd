@@ -4,7 +4,7 @@ author: "Brian Yandell"
 date: "2024-10-24"
 output: html_document
 params:
-  species: "Grus americana"
+  species: "Whooping Crane"
   gbif_dir: "gbif_grus"
 ---
 
@@ -23,6 +23,11 @@ for(i in dir("R")) {
 
 This has some general things about GBIF account
 and some specific things about getting single species data.
+
+From other student working on Sandhill Cranes:
+
+- <https://www.gbif.org/occurrence/download/0014700-241007104925546>
+- <https://doi.org/10.15468/dl.4g5csj>
 
 ```{r}
 gbif_credentials(FALSE)
@@ -49,7 +54,7 @@ species_info <- rgbif::name_lookup(params$species, rank='SPECIES')
 ```
 
 ```{r}
-dplyr::select(species_info$data[1,], scientificName, species, nubKey)
+dplyr::select(species_info$data[1,], species, key, nubKey)
 ```
 
 ```{r}
@@ -58,72 +63,87 @@ nrow(species_info$data)
 
 ```{r}
 # Query species
-knitr::kable(dplyr::count(species_info$data, scientificName, species, nubKey))
+dplyr::arrange(species_info$data, key) |>
+  dplyr::group_by(species, nubKey) |>
+  dplyr::summarize(count = dplyr::n(),
+                   key = paste(key, collapse = ","),
+                   .groups = "drop") |>
+  dplyr::ungroup() |>
+  dplyr::arrange(species, nubKey) |>
+  knitr::kable()
 ```
 
-```{r}
-dplyr::filter(species_info$data,
-                    .data$species == params$species) |>
-  dplyr::count(scientificName, species, nubKey)
-```
+Find out more about the `key` names.
 
 ```{r}
-# Get the first result
+dplyr::arrange(dplyr::bind_rows(species_info$names, .id = "key"), key) |>
+  knitr::kable()
+```
+
+Get the most common result, not filtering on `species` as user supplied name
+may have misspelled.
+
+```{r}
 (species_data <- 
   dplyr::filter(
     dplyr::count(
       dplyr::filter(species_info$data,
-                    .data$species == params$species,
                     !is.na(.data$nubKey)),
         species, nubKey),
     n == max(n)))
+```
+
+Use this species key (nubKey) to pull data.
+
+```{r}
+species_key <- species_data$nubKey[1]
 ```
 
 ```{r}
 knitr::knit_exit()
 ```
 
-Use species key (nubKey) to pull data.
+## Getting Occurrence Data 
+
+See package `rgbif`
+[Getting Occurrence Data From GBIF](https://docs.ropensci.org/rgbif/articles/getting_occurrence_data.html)
+for suggested use.
 **This part not proofed yet.**
 
 ```{r}
-species_key <- species_data$nubKey[1]
-
 # Download data from GBIF
 gbif_pattern <- file.path(gbif_dir, '*.csv')
 
 if (length(list.files(gbif_dir, pattern = "*.csv")) == 0) {
     # Only submit one request
-    if (is.null(Sys.getenv("GBIF_DOWNLOAD_KEY"))) {
+    if (is.null(Sys.getenv("GBIF_DOWNLOAD_KEY")) ||
+        0 == length(Sys.getenv("GBIF_DOWNLOAD_KEY"))) {
         # Submit query to GBIF
         gbif_query <- rgbif::occ_download(
-            rgbif::pred("speciesKey", 2474953),
-            rgbif::pred("hasCoordinate", TRUE),
+#          user = Sys.getenv("GBIF_USER"),
+#          pwd = Sys.getenv("GBIF_PWD"),
+#          email = Sys.getenv("GBIF_EMAIL"),
+            rgbif::pred("speciesKey", species_key),
+            rgbif::pred_default(),
             rgbif::pred("year", 2023)
         )
-        Sys.setenv(GBIF_DOWNLOAD_KEY = gbif_query$key)
     }
 
     # Wait for the download to build
-    download_key <- Sys.getenv("GBIF_DOWNLOAD_KEY")
-    wait <- rgbif::occ_download_meta(download_key)$status
-    while (wait != 'SUCCEEDED') {
-        wait <- rgbif::occ_download_meta(download_key)$status
+    wait <- rgbif::occ_download_meta(gbif_query)
+    while (wait$status == 'PREPARING') { # SUCCEEDED
+        wait <- rgbif::occ_download_meta(download_key)
         Sys.sleep(5)
     }
 
     # Download GBIF data
-    download_info <- rgbif::occ_download_get(
-        Sys.getenv("GBIF_DOWNLOAD_KEY"), 
-        path = data_dir
-    )
-
-    # Unzip GBIF data
-    utils::unzip(download_info$path, exdir = gbif_dir)
+    rgbif::occ_download_get(wait$key, path = data_dir)
 }
+# Print DOI
+cat("DOI", wait$doi)
 
-# Find the extracted .csv file path (take the first result)
-gbif_path <- list.files(gbif_dir, pattern = "*.csv", full.names = TRUE)[1]
+# Find the extracted .zip file path (take the first result)
+gbif_path <- list.files(gbif_dir, pattern = "*.zip", full.names = TRUE)[1]
 gbif_path
 ```
 
